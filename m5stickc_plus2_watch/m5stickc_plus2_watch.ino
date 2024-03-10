@@ -24,9 +24,22 @@
 
 #define DEFAULT_DELAY 100
 #define DEFAULT_DRAW_DELAY 2000
+#define ALARM_BUZZ_INTERVAL 1000;
+#define BTNB_HOLD_SWITCH_DELAY 1001;
 
 #define MODE_CLOCK 0
 #define MODE_FLASHLIGHT 1
+#define MODE_ALARM 2
+//#define MODE_DICE 3
+
+#define MODE_CLOCK_DRAW_DELAY 3000
+#define MODE_FLASHLIGHT_DRAW_DELAY 10000
+#define MODE_ALARM_DRAW_DELAY 1000
+
+unsigned int diceType;
+unsigned int diceCount;
+unsigned int * diceResult;
+unsigned int diceSum;
 
 float normalized_max = (MAX_VOLTAGE - MIN_VOLTAGE)*1.0f;
 int clockColor;
@@ -38,7 +51,8 @@ int drawDelay;
 int modes[] = 
 {
   MODE_CLOCK,
-  MODE_FLASHLIGHT
+  MODE_FLASHLIGHT,
+  MODE_ALARM
 };
 
 struct Time
@@ -60,14 +74,30 @@ Time modeChangedTime = {1,1,0,0,0};
 
 Time drawTime = {1,1,0,0,0};
 
+Time alarmTime = {1,1,0,0,0};
+
+Time holdSwitchTime = {1,1,0,0,0};
+
 int modeChangeSeconds;
 int modeChange;
 
 int mode;
 int modeIndex;
+bool alarmEnable;
+bool alarmExecute;
+int alarmSetType;
+bool alarmKilled;
+int alarmLastBeepSecond;
+bool isNextHour;
+bool isNextMinute;
 
 void setup() 
 {
+    isNextHour = false;
+    isNextMinute = false;
+    alarmLastBeepSecond = 0;
+    alarmKilled = false;
+    alarmSetType = 0;
     drawDelay = DEFAULT_DRAW_DELAY;
     nextFrameDelayMilis = DEFAULT_DELAY;
     modeIndex = 0;
@@ -85,6 +115,18 @@ void setup()
     startTime.hour = ((st.time.hours)+TIMEZONE)%24;
     startTime.minute = st.time.minutes;
     startTime.second = st.time.seconds;
+
+    alarmTime.month = startTime.month;
+    alarmTime.day = startTime.day;
+    alarmTime.hour = 0;
+    alarmTime.minute = 0;
+    alarmTime.second = 0;
+
+    holdSwitchTime.hour = startTime.hour;
+    holdSwitchTime.minute = startTime.minute;
+    holdSwitchTime.second = startTime.second;
+    holdSwitchTime.day = startTime.day;
+    holdSwitchTime.month = startTime.month;
 }
 
 void getDevicesData()
@@ -94,15 +136,76 @@ void getDevicesData()
   int normalized_vol = batteryVoltage - MIN_VOLTAGE;
   batteryPercent = (int)((normalized_vol * 1.0f) / (normalized_max) * 100.0f);
   auto dt = StickCP2.Rtc.getDateTime();
-  curTime.hour = ((dt.time.hours)+TIMEZONE)%24;
+
+  unsigned int curHour = ((dt.time.hours)+TIMEZONE)%24;
+  isNextHour = false;
+  if (curHour != curTime.hour)
+  {
+    isNextHour = true;
+  }
+  curTime.hour = curHour;
+
+  isNextMinute = false;
+  if (dt.time.minutes != curTime.minute)
+  {
+    isNextMinute = true;
+    if (alarmKilled)
+    {
+      alarmKilled = false;
+    }
+  }
   curTime.minute = dt.time.minutes;
   curTime.second = dt.time.seconds;
   curTime.day = dt.date.date;
   curTime.month = dt.date.month;
 
+  bool btnBHold = StickCP2.BtnB.wasHold();
+  bool btnBPressed = StickCP2.BtnB.wasPressed();
+  bool btnBReleased = StickCP2.BtnB.wasReleased();
+  if (btnBHold)
+  {
+    holdSwitchTime.hour = curTime.hour;
+    holdSwitchTime.minute = curTime.minute;
+    holdSwitchTime.second = curTime.second;
+    holdSwitchTime.day = curTime.day;
+    holdSwitchTime.month = curTime.month;
+  }
+
   if (StickCP2.BtnA.wasPressed()) 
   {
+    if (alarmExecute)
+    {
+      alarmExecute = false;
+      alarmKilled = true;
+    }
     setModeToNext();
+  }
+  if (mode == MODE_ALARM)
+  {
+    if (btnBHold)
+    {
+        alarmSetType = (alarmSetType + 1) % 3;
+        if (alarmSetType == 2)
+        {
+          alarmEnable = !alarmEnable;
+        }
+    }
+    else if (btnBReleased)
+    {
+      int milisDiff = GetSecsDiff(curTime, holdSwitchTime) * 1000;
+      int minDiff = BTNB_HOLD_SWITCH_DELAY;
+      if (milisDiff >= minDiff)
+      {
+        if (alarmSetType == 0)
+        {
+          alarmTime.hour = ((alarmTime.hour + 1) % 24);
+        }
+        else if (alarmSetType == 1)
+        {
+          alarmTime.minute = ((alarmTime.minute + 1) % 60);
+        }
+      }
+    }
   }
 }
 
@@ -118,6 +221,33 @@ void resetMode()
   setMode();
 }
 
+void beepAlarm()
+{
+  if (alarmEnable != true)
+  {
+    return;
+  }
+  if (!alarmExecute)
+  {
+    if (alarmTime.hour == curTime.hour && alarmTime.minute == curTime.minute)
+    {
+      alarmExecute = true;
+    }
+  }
+  if (alarmExecute && !alarmKilled)
+  {
+    if (curTime.second % 2 == 0 && alarmLastBeepSecond < curTime.second)
+    {
+      alarmLastBeepSecond = curTime.second;
+      StickCP2.Speaker.tone(8000, 200);
+    }
+    if (alarmTime.hour != curTime.hour || alarmTime.minute != curTime.minute)
+    {
+      alarmExecute = false;
+    }
+  }
+}
+
 void setMode()
 {
   if (modeIndex >= sizeof(modes)/sizeof(modes[0]))
@@ -129,16 +259,56 @@ void setMode()
     switch (modes[modeIndex])
     {
       case MODE_CLOCK:
-        drawDelay = DEFAULT_DRAW_DELAY;
-        StickCP2.Display.setBrightness(100);
+        drawDelay = MODE_CLOCK_DRAW_DELAY;
+        StickCP2.Display.setBrightness(50);
         break;
       case MODE_FLASHLIGHT:
-        drawDelay = 5000;
+        drawDelay = MODE_FLASHLIGHT_DRAW_DELAY;
         StickCP2.Display.setBrightness(255);
+        break;
+      case MODE_ALARM:
+        drawDelay = MODE_ALARM_DRAW_DELAY;
+        break;
+      default:
+        drawDelay = DEFAULT_DRAW_DELAY;
         break;
     }
   }
   mode = modes[modeIndex];
+}
+
+void displayAlarm()
+{
+    StickCP2.Display.clear();
+    
+    StickCP2.Display.setTextSize(1);
+    StickCP2.Display.setCursor(20, 20);
+    StickCP2.Display.printf("ALARM");
+
+    if (alarmEnable)
+    {
+      StickCP2.Display.setCursor(130, 20);
+      StickCP2.Display.printf("ON");
+    }
+    else
+    {
+      StickCP2.Display.setCursor(130, 20);
+      StickCP2.Display.printf("OFF");
+    }
+
+    StickCP2.Display.setTextSize(2.0f);
+    StickCP2.Display.setCursor(20, 60);
+    StickCP2.Display.printf("%02d:%02d", alarmTime.hour, alarmTime.minute);
+
+    StickCP2.Display.setCursor(20, 80);
+    if (alarmSetType == 0)
+    {
+      StickCP2.Display.printf("---");
+    }
+    else if(alarmSetType == 1)
+    {
+      StickCP2.Display.printf("     ---");
+    }
 }
 
 void displayMode()
@@ -156,6 +326,9 @@ void displayMode()
     case MODE_FLASHLIGHT:
       displayFlashlight(1);
       break;
+    case MODE_ALARM:
+      displayAlarm();
+      break;
     default:
       resetMode();
       displayClockView(clockColor);
@@ -167,6 +340,7 @@ void loop()
 {
   int oldMode = mode;
   getDevicesData();
+  beepAlarm();
 
   int milisFromDisplay = GetSecsDiff(curTime, drawTime) * 1000;
   if (mode != oldMode || (milisFromDisplay > 0 && milisFromDisplay >= drawDelay))
@@ -230,3 +404,23 @@ void displayClockView(int color)
     StickCP2.Display.setCursor(130, 50);
     StickCP2.Display.printf("%02d/%02d",curTime. day, curTime.month);
 }
+
+void setAlarm(int hour, int minute)
+{
+  alarmTime.hour = hour;
+  alarmTime.minute = minute;
+  alarmEnable = true;
+}
+
+
+void roll()
+{
+  diceResult = new unsigned int(diceCount);
+  diceSum = 0;
+  for (unsigned int i=0; i<diceCount; i++)
+  {
+    diceResult[i] = (rand() % diceType) + 1;
+    diceSum += diceResult[i];
+  }
+}
+
