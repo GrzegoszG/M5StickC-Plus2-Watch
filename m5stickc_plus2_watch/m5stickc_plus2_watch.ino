@@ -27,7 +27,7 @@
 
 #define TOO_MANY_SECONDS 86400 //24h
 
-#define DEFAULT_DELAY 100
+#define DEFAULT_DELAY 150
 #define DEFAULT_DRAW_DELAY 2000
 #define ALARM_BUZZ_INTERVAL 1000;
 #define BTNB_HOLD_SWITCH_DELAY 1001;
@@ -40,7 +40,11 @@
 #define MODE_CLOCK_DRAW_DELAY 3000
 #define MODE_FLASHLIGHT_DRAW_DELAY 10000
 #define MODE_ALARM_DRAW_DELAY 1000
-
+#define DEFAULT_BRIGHTNESS 10
+#define IDLE_BRIGHTNESS 1
+#define IDLE_MILIS 5000
+#define CLOCK_FREQUENCY 80
+#define GET_BAT_ITERATIONS 5
 
 #define SERVICE_UUID "4fafc201-1fb5-459e-8fcc-c5c9c331914b" // random uuid
 
@@ -88,6 +92,8 @@ Time alarmTime = {1,1,0,0,0};
 
 Time holdSwitchTime = {1,1,0,0,0};
 
+Time lastClickTime = {1,1,0,0,0};
+
 int modeChangeSeconds;
 int modeChange;
 
@@ -100,9 +106,17 @@ bool alarmKilled;
 int alarmLastBeepSecond;
 bool isNextHour;
 bool isNextMinute;
+int modeCount;
+int brightness;
+int prevBrightness;
+bool idle;
+bool redraw;
+int getBatCounter;
+// M5.BtnPWR.
 
 void setup() 
 {
+    getBatCounter = GET_BAT_ITERATIONS;
     isNextHour = false;
     isNextMinute = false;
     alarmLastBeepSecond = 0;
@@ -110,6 +124,7 @@ void setup()
     alarmSetType = 0;
     drawDelay = DEFAULT_DRAW_DELAY;
     nextFrameDelayMilis = DEFAULT_DELAY;
+    brightness = DEFAULT_BRIGHTNESS;
     modeIndex = 0;
     auto cfg = M5.config();
     StickCP2.begin(cfg);
@@ -138,46 +153,55 @@ void setup()
     holdSwitchTime.day = startTime.day;
     holdSwitchTime.month = startTime.month;
 
+    lastClickTime.hour = startTime.hour;
+    lastClickTime.minute = startTime.minute;
+    lastClickTime.second = startTime.second;
+    lastClickTime.day = startTime.day;
+    lastClickTime.month = startTime.month;
+    modeCount = sizeof(modes)/sizeof(modes[0]);
+    setCpuFrequencyMhz(CLOCK_FREQUENCY);
     //initBT();
 }
 
 void initBT()
 {
   BLEDevice::init("M5Stick C PLUS 2");
-
   BLEServer *pServer = BLEDevice::createServer();
-
   BLEService *pService = pServer->createService(SERVICE_UUID);
-
   BLECharacteristic *pCharacteristic = pService->createCharacteristic(
   CHARACTERISTIC_UUID,
   BLECharacteristic::PROPERTY_READ |
   BLECharacteristic::PROPERTY_WRITE );
-
   pCharacteristic->setValue("Hello World");
   pService->start();
-
   // BLEAdvertising *pAdvertising = pServer->getAdvertising(); // this still is working for backward compatibility
-
   BLEAdvertising *pAdvertising = BLEDevice::getAdvertising();
-
   pAdvertising->addServiceUUID(SERVICE_UUID);
-
   pAdvertising->setScanResponse(true);
-
   pAdvertising->setMinPreferred(0x06); // functions that help with iPhone connections issue
-
   pAdvertising->setMinPreferred(0x12);
-
   BLEDevice::startAdvertising();
 }
 
 void getDevicesData()
 {
   StickCP2.update();
-  batteryVoltage = StickCP2.Power.getBatteryVoltage();
-  int normalized_vol = batteryVoltage - MIN_VOLTAGE;
-  batteryPercent = (int)((normalized_vol * 1.0f) / (normalized_max) * 100.0f);
+
+  --getBatCounter;
+  if (getBatCounter <= 0)
+  {
+    getBatCounter = GET_BAT_ITERATIONS;
+    batteryVoltage = StickCP2.Power.getBatteryVoltage();
+    int normalized_vol = batteryVoltage - MIN_VOLTAGE;
+    int per = (int)((normalized_vol * 1.0f) / (normalized_max) * 100.0f);
+    int diff = per - batteryPercent;
+    batteryPercent = per;
+    if (diff > 1 || diff < -1)
+    {
+      redraw = true;
+    }
+  }
+
   auto dt = StickCP2.Rtc.getDateTime();
 
   unsigned int curHour = ((dt.time.hours)+TIMEZONE)%24;
@@ -185,6 +209,7 @@ void getDevicesData()
   if (curHour != curTime.hour)
   {
     isNextHour = true;
+    redraw = true;
   }
   curTime.hour = curHour;
 
@@ -192,6 +217,7 @@ void getDevicesData()
   if (dt.time.minutes != curTime.minute)
   {
     isNextMinute = true;
+    redraw = true;
     if (alarmKilled)
     {
       alarmKilled = false;
@@ -205,6 +231,28 @@ void getDevicesData()
   bool btnBHold = StickCP2.BtnB.wasHold();
   bool btnBPressed = StickCP2.BtnB.wasPressed();
   bool btnBReleased = StickCP2.BtnB.wasReleased();
+  bool btnAPressed = StickCP2.BtnA.wasPressed();
+  if (btnBHold || btnBPressed || btnBReleased || btnAPressed)
+  {
+    idle = false;
+    brightness = DEFAULT_BRIGHTNESS;
+    redraw = true;
+    lastClickTime.hour = curTime.hour;
+    lastClickTime.minute = curTime.minute;
+    lastClickTime.second = curTime.second;
+    lastClickTime.day = curTime.day;
+    lastClickTime.month = curTime.month;
+  }
+  if (brightness > IDLE_BRIGHTNESS)
+  {
+    int btnDiffMilis = GetSecsDiff(curTime, lastClickTime) * 1000;
+    if (btnDiffMilis > IDLE_MILIS)
+    {
+      idle = true;
+      brightness = IDLE_BRIGHTNESS;
+    }
+  }
+
   if (btnBHold)
   {
     holdSwitchTime.hour = curTime.hour;
@@ -214,7 +262,7 @@ void getDevicesData()
     holdSwitchTime.month = curTime.month;
   }
 
-  if (StickCP2.BtnA.wasPressed()) 
+  if (btnAPressed) 
   {
     if (alarmExecute)
     {
@@ -293,7 +341,7 @@ void beepAlarm()
 
 void setMode()
 {
-  if (modeIndex >= sizeof(modes)/sizeof(modes[0]))
+  if (modeIndex >= modeCount)
   {
     modeIndex = 0;
   }
@@ -301,13 +349,13 @@ void setMode()
   {
     switch (modes[modeIndex])
     {
+      brightness = DEFAULT_BRIGHTNESS;
       case MODE_CLOCK:
         drawDelay = MODE_CLOCK_DRAW_DELAY;
-        StickCP2.Display.setBrightness(50);
         break;
       case MODE_FLASHLIGHT:
         drawDelay = MODE_FLASHLIGHT_DRAW_DELAY;
-        StickCP2.Display.setBrightness(255);
+        brightness = 255;
         break;
       case MODE_ALARM:
         drawDelay = MODE_ALARM_DRAW_DELAY;
@@ -356,6 +404,12 @@ void displayAlarm()
 
 void displayMode()
 {
+  if (prevBrightness != brightness)
+  {
+    StickCP2.Display.setBrightness(brightness);
+  }
+  prevBrightness = brightness;
+
   drawTime.month = curTime.month;
   drawTime.day = curTime.day;
   drawTime.hour = curTime.hour;
@@ -385,10 +439,10 @@ void loop()
   getDevicesData();
   beepAlarm();
 
-  int milisFromDisplay = GetSecsDiff(curTime, drawTime) * 1000;
-  if (mode != oldMode || (milisFromDisplay > 0 && milisFromDisplay >= drawDelay))
+  if (redraw)
   {
     displayMode();
+    redraw = false;
   }
   
   waitTillNextFrame();
@@ -434,6 +488,12 @@ void displayClockView(int color)
     StickCP2.Display.setCursor(20, 20);
     StickCP2.Display.printf("%d %%", batteryPercent);
 
+    if (idle)
+    {
+      StickCP2.Display.setCursor(20, 50);
+      StickCP2.Display.printf("IDLE");
+    }
+
     StickCP2.Display.setTextSize(2.0f);
 
     StickCP2.Display.setCursor(50, 90);
@@ -442,7 +502,7 @@ void displayClockView(int color)
     StickCP2.Display.setTextSize(0.8f);
 
     StickCP2.Display.setCursor(130, 20);
-    StickCP2.Display.printf("%dmv", batteryVoltage);
+    StickCP2.Display.printf("%d", brightness);
 
     StickCP2.Display.setCursor(130, 50);
     StickCP2.Display.printf("%02d/%02d",curTime. day, curTime.month);
@@ -454,7 +514,6 @@ void setAlarm(int hour, int minute)
   alarmTime.minute = minute;
   alarmEnable = true;
 }
-
 
 void roll()
 {
