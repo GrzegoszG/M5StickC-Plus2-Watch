@@ -24,7 +24,7 @@
 
 #define MAX_VOLTAGE 4350
 #define MIN_VOLTAGE 3000
-#define TIMEZONE 1
+#define TIMEZONE 2
 
 #define TOO_MANY_SECONDS 86400 //24h
 
@@ -37,6 +37,7 @@
 #define MODE_FLASHLIGHT 1
 #define MODE_ALARM 2
 #define MODE_ROLL 3
+#define MODE_TEXT 4
 
 #define MODE_CLOCK_DRAW_DELAY 3000
 #define MODE_FLASHLIGHT_DRAW_DELAY 10000
@@ -51,6 +52,7 @@
 #define SERVICE_UUID "4fafc201-1fb5-459e-8fcc-c5c9c331914b" // random uuid
 
 #define CHARACTERISTIC_UUID "beb5483e-36e1-4688-b7f5-ea07361b2137" //random uuid
+#define CHARACTERISTIC_BATT_UUID "dead483e-36e1-4688-b7f5-ea07361b2137"
 #define DICE_TYPES_COUNT 9
 #define DICE_COUNT_MAX 6
 
@@ -63,7 +65,9 @@
 #define BTNA 0
 #define BTNB 1
 #define BTNPWR 2
-
+#define PI 3.1415
+#define DEGREES_OFFSET -90
+#define GO_TO_FIRST_MODE_ON_IDLE true
 unsigned int diceType;
 unsigned int diceCount;
 int * diceResult;
@@ -81,7 +85,8 @@ int modes[] =
   MODE_CLOCK,
   MODE_FLASHLIGHT,
   MODE_ALARM,
-  MODE_ROLL
+  MODE_ROLL,
+  MODE_TEXT
 };
 
 int colors[] = 
@@ -141,7 +146,10 @@ int randCounter = 1000;
 // M5.BtnPWR.
 bool prevDeviceConnected;
 bool deviceConnected;
-
+char * text;
+std::string toDisplay;
+int charWriteCounter;
+int charWriteCounterPrev;
 int btnStatus[3] = 
 {
   BTN_STATUS_NONE, BTN_STATUS_NONE, BTN_STATUS_NONE
@@ -150,6 +158,9 @@ int btnStatus[3] =
 int rollMode = 0;
 
 Preferences preferences;
+int displayWidth;  // 135 px
+int displayHeight; // 240 px
+
 
 
 //Setup callbacks onConnect and onDisconnect
@@ -159,6 +170,8 @@ class BLECallbacks: public BLEServerCallbacks {
   };
   void onDisconnect(BLEServer* pServer) {
     deviceConnected = false;
+    pServer->getAdvertising()->stop();
+    pServer->getAdvertising()->start();
   }
 };
 
@@ -175,12 +188,16 @@ class BLECharCallbacks : public BLECharacteristicCallbacks {
 
   void onWrite(BLECharacteristic* pCharacteristic, esp_ble_gatts_cb_param_t* param)
   {
-
+    charWriteCounter++;
+    auto value = pCharacteristic->getValue();
+    toDisplay = value;
   }
 
   void onWrite(BLECharacteristic* pCharacteristic)
   {
-
+    charWriteCounter++;
+    auto value = pCharacteristic->getValue();
+    toDisplay = value;
   }
 
   void onNotify(BLECharacteristic* pCharacteristic)
@@ -206,6 +223,9 @@ void setup()
     nextFrameDelayMilis = DEFAULT_DELAY;
     brightness = DEFAULT_BRIGHTNESS;
     modeIndex = 0;
+    toDisplay = "";
+    charWriteCounter = 0;
+    charWriteCounterPrev = 0;
     auto cfg = M5.config();
     StickCP2.begin(cfg);
     preferences.begin("app", false);
@@ -216,7 +236,8 @@ void setup()
     StickCP2.Display.setTextFont(&fonts::Orbitron_Light_24);
     StickCP2.Display.setTextSize(1);
     auto st = StickCP2.Rtc.getDateTime();
-
+    displayWidth = StickCP2.Display.width();
+    displayHeight = StickCP2.Display.height();
     startTime.month = st.date.month;
     startTime.day = st.date.date;
     startTime.hour = ((st.time.hours)+TIMEZONE)%24;
@@ -256,18 +277,30 @@ int getRandom(int from, int to)
   return r;
 }
 
+BLEServer *pServer;
+BLEService *pService;
+BLECharacteristic *pCharacteristic;
+BLECharacteristic *battChar;
+
 void initBT()
 {
   BLEDevice::init("M5Stick C PLUS 2");
-  BLEServer *pServer = BLEDevice::createServer();
+  pServer = BLEDevice::createServer();
   pServer->setCallbacks(new BLECallbacks());
-  BLEService *pService = pServer->createService(SERVICE_UUID);
-  BLECharacteristic *pCharacteristic = pService->createCharacteristic(
+  pService = pServer->createService(SERVICE_UUID);
+  pCharacteristic = pService->createCharacteristic(
   CHARACTERISTIC_UUID,
   BLECharacteristic::PROPERTY_READ |
   BLECharacteristic::PROPERTY_WRITE );
   pCharacteristic->setValue("Hello World");
   pCharacteristic->setCallbacks(new BLECharCallbacks());
+
+  battChar = pService->createCharacteristic(
+  CHARACTERISTIC_BATT_UUID,
+  BLECharacteristic::PROPERTY_READ );
+  pCharacteristic->setValue(batteryPercent); 
+  pCharacteristic->setCallbacks(new BLECharCallbacks());
+
   pService->start();
   // BLEAdvertising *pAdvertising = pServer->getAdvertising(); // this still is working for backward compatibility
   BLEAdvertising *pAdvertising = BLEDevice::getAdvertising();
@@ -278,7 +311,6 @@ void initBT()
   BLEDevice::startAdvertising();
 }
 
-
 void getDevicesData()
 {
   StickCP2.update();
@@ -287,6 +319,12 @@ void getDevicesData()
   {
     randCounter = 1000;
   }
+
+  if (charWriteCounter >= 1000 || charWriteCounterPrev >= 1000)
+  {
+    charWriteCounter = 0;
+    charWriteCounterPrev = 0;
+  } 
   --getBatCounter;
   if (getBatCounter <= 0)
   {
@@ -299,6 +337,7 @@ void getDevicesData()
     if (diff > 1 || diff < -1)
     {
       redraw = true;
+      battChar->setValue(batteryPercent);
     }
   }
 
@@ -370,6 +409,13 @@ void getDevicesData()
     if (btnDiffMilis > IDLE_MILIS && mode != MODE_FLASHLIGHT)
     {
       idle = true;
+      if (GO_TO_FIRST_MODE_ON_IDLE)
+      {
+        if (modeIndex != 0)
+        {
+          resetMode();
+        }
+      }
       brightness = IDLE_BRIGHTNESS;
     }
   }
@@ -454,6 +500,13 @@ void getDevicesData()
   {
     redraw = true;
     prevDeviceConnected = deviceConnected;
+  }
+  if (charWriteCounter != charWriteCounterPrev)
+  {
+    modeIndex = MODE_TEXT;
+    redraw = true;
+    setMode();
+    charWriteCounterPrev = charWriteCounter;
   }
 }
 
@@ -595,11 +648,23 @@ void displayMode()
     case MODE_ROLL:
       displayRoll();
       break;
+    case MODE_TEXT:
+      displayText();
+      break;
     default:
       resetMode();
       displayClockView(clockColor);
       break;
   }
+}
+
+void displayText()
+{
+    StickCP2.Display.clear();
+    StickCP2.Display.setTextColor(WHITE);
+    StickCP2.Display.setTextSize(1);
+    StickCP2.Display.setCursor(20, 20);
+    StickCP2.Display.printf(toDisplay.c_str());
 }
 
 void loop() 
@@ -643,7 +708,7 @@ void displayFlashlight(int milis)
   StickCP2.Display.fillRect(0, 0, StickCP2.Display.width(), StickCP2.Display.height(), WHITE);
 }
 
-void displayClockView(int color)
+void displayClockViewDebug(int color)
 {
   if (color != clockColor)
   {
@@ -680,6 +745,118 @@ void displayClockView(int color)
 
     StickCP2.Display.setCursor(130, 50);
     StickCP2.Display.printf("%02d/%02d",curTime. day, curTime.month);
+}
+
+void displayClockView(int color)
+{
+  displayAnalogClock();
+  return;
+  if (color != clockColor)
+  {
+    StickCP2.Display.setTextColor(color);
+    clockColor = color;
+  }
+
+    StickCP2.Display.clear();
+    
+    StickCP2.Display.setTextSize(1);
+    StickCP2.Display.setCursor(20, 20);
+    StickCP2.Display.printf("%d %%", batteryPercent);
+
+    StickCP2.Display.setTextSize(2.0f);
+
+    StickCP2.Display.setCursor(50, 90);
+    
+    StickCP2.Display.printf("%02d:%02d", curTime.hour, curTime.minute);
+    StickCP2.Display.setTextSize(0.8f);
+
+    StickCP2.Display.setCursor(130, 20);
+    StickCP2.Display.printf("%d", brightness);
+
+    StickCP2.Display.setCursor(130, 50);
+    StickCP2.Display.printf("%02d/%02d",curTime. day, curTime.month);
+}
+
+void displayAnalogClock()
+{
+  int r = displayHeight;
+  if (displayWidth < r)
+  {
+    r = displayWidth;
+  }
+  r = (r / 2) - 4;
+  int centerX = displayWidth / 2;
+  //centerX += 40;
+  int centerY = displayHeight / 2;
+
+  int hoursArmLen = r * 0.55;
+  int minArmLen = r * 0.95;
+
+  int hour = (curTime.hour % 12);
+  int min = curTime.minute;
+  float hourDegrees = (30.0 * hour);
+
+  if (min >= 30)
+  {
+    hourDegrees += 15.0;
+  }
+
+  float minDegrees = (6.0 * min);
+
+  int hourX = (int)getPointXonCircle(hoursArmLen, hourDegrees) + centerX;
+  int hourY = (int)getPointYonCircle(hoursArmLen, hourDegrees) + centerY;
+
+  int minX = (int)getPointXonCircle(minArmLen, minDegrees) + centerX;
+  int minY = (int)getPointYonCircle(minArmLen, minDegrees) + centerY;
+
+  StickCP2.Display.clear();
+  StickCP2.Display.setColor(WHITE);
+  StickCP2.Display.drawCircle(centerX, centerY, r);
+
+  //StickCP2.Display.setTextSize(1);
+  //StickCP2.Display.setCursor(20, 20);
+  //StickCP2.Display.printf("h %d", (int)hourDegrees);
+
+  //StickCP2.Display.setCursor(20, 110);
+  //StickCP2.Display.printf("m %d", (int)minDegrees);
+
+  for (int i=0; i<12; i++)
+  {
+    float mult = (i % 3 == 0) ? 0.8 : 0.9;
+    int tempR = (int)(r * mult);
+    float degrees = 30.0 * i;
+    int tempX0 = (int)getPointXonCircle(tempR, degrees) + centerX;
+    int tempY0 = (int)getPointYonCircle(tempR, degrees) + centerY;
+
+    int tempX1 = (int)getPointXonCircle(r, degrees) + centerX;
+    int tempY1 = (int)getPointYonCircle(r, degrees) + centerY;
+
+    StickCP2.Display.setColor(WHITE);
+    StickCP2.Display.drawLine(tempX0, tempY0, tempX1, tempY1);
+  }
+
+  // draw hours arm
+  StickCP2.Display.setColor(RED);
+  StickCP2.Display.drawLine(centerX, centerY, hourX, hourY);
+
+  // draw minutes arm
+  StickCP2.Display.setColor(BLUE);
+  StickCP2.Display.drawLine(minX, minY, centerX, centerY);
+
+  
+  StickCP2.Display.setTextSize(1);
+  StickCP2.Display.setCursor(20, 20);
+  StickCP2.Display.printf("%d %%", batteryPercent);
+}
+
+float getPointXonCircle(int r, float degrees)
+{
+  return r * cos((degrees + (DEGREES_OFFSET)) * PI / 180.0);
+}
+
+float getPointYonCircle(int r, float degrees)
+{
+  return r * sin((degrees + (DEGREES_OFFSET)) * PI / 180.0);
 }
 
 void setAlarm(int hour, int minute)
