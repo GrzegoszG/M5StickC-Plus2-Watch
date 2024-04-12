@@ -38,21 +38,26 @@
 #define MODE_ALARM 2
 #define MODE_ROLL 3
 #define MODE_TEXT 4
+#define MODE_STOPWATCH 5
+#define MODE_TIMER2 6
 
 #define MODE_CLOCK_DRAW_DELAY 3000
 #define MODE_FLASHLIGHT_DRAW_DELAY 10000
 #define MODE_ALARM_DRAW_DELAY 1000
+#define MODE_STOPWATCH_RUNNING_DELAY 500
 #define DEFAULT_BRIGHTNESS 10
 #define IDLE_BRIGHTNESS 1
-#define IDLE_MILIS 5000
+#define IDLE_MILIS 30000
+#define BT_TEXT_IDLE_MILIS 10000
 #define CLOCK_FREQUENCY 80
 #define GET_BAT_ITERATIONS 5
 #define RTC_SEC_OFFSET 5
 
 #define SERVICE_UUID "4fafc201-1fb5-459e-8fcc-c5c9c331914b" // random uuid
 
-#define CHARACTERISTIC_UUID "beb5483e-36e1-4688-b7f5-ea07361b2137" //random uuid
-#define CHARACTERISTIC_BATT_UUID "dead483e-36e1-4688-b7f5-ea07361b2137"
+#define CHAR_TEXT_UUID "beb5483e-36e1-4688-b7f5-ea07361b2137" //random uuid
+#define CHAR_BATT_UUID "dead483e-36e1-4688-b7f5-ea07361b2137"
+#define CHAR_CMD_OUT_UUID "d00baaaa-36e1-4688-b7f5-ea07361b2138"
 #define DICE_TYPES_COUNT 9
 #define DICE_COUNT_MAX 6
 
@@ -61,6 +66,8 @@
 #define BTN_STATUS_CLICKED 2
 #define BTN_STATUS_PRESSED 3
 #define BTN_STATUS_RELEASED 4
+
+#define CMD_MEDIA_TOGGLE 1
 
 #define BTNA 0
 #define BTNB 1
@@ -86,7 +93,10 @@ int modes[] =
   MODE_FLASHLIGHT,
   MODE_ALARM,
   MODE_ROLL,
-  MODE_TEXT
+  MODE_TEXT,
+  MODE_STOPWATCH
+//,
+//  MODE_TIMER
 };
 
 int colors[] = 
@@ -123,6 +133,14 @@ Time drawTime = {1,1,0,0,0};
 Time alarmTime = {1,1,0,0,0};
 Time holdSwitchTime = {1,1,0,0,0};
 Time lastClickTime = {1,1,0,0,0};
+Time stopwatchStart = {1,1,0,0,0};
+Time timerStartedAt = {1,1,0,0,0};
+int timerSecs = 0;
+int timerSecsLeft = 0;
+
+int stopwatchHours = 0;
+int stopwatchMinutes = 0;
+int stopwatchSeconds = 0;
 
 int modeChangeSeconds;
 int modeChange;
@@ -161,7 +179,12 @@ Preferences preferences;
 int displayWidth;  // 135 px
 int displayHeight; // 240 px
 
+bool beepOnNotification;
 
+bool stopwatchRunning = false;
+bool timerRunning = false;
+int stopwatchElapsedSecs = 0;
+int idleMilis = 0;
 
 //Setup callbacks onConnect and onDisconnect
 class BLECallbacks: public BLEServerCallbacks {
@@ -280,6 +303,7 @@ int getRandom(int from, int to)
 BLEServer *pServer;
 BLEService *pService;
 BLECharacteristic *pCharacteristic;
+BLECharacteristic *pCharCommandOut;
 BLECharacteristic *battChar;
 
 void initBT()
@@ -289,14 +313,20 @@ void initBT()
   pServer->setCallbacks(new BLECallbacks());
   pService = pServer->createService(SERVICE_UUID);
   pCharacteristic = pService->createCharacteristic(
-  CHARACTERISTIC_UUID,
+  CHAR_TEXT_UUID,
   BLECharacteristic::PROPERTY_READ |
   BLECharacteristic::PROPERTY_WRITE );
   pCharacteristic->setValue("Hello World");
   pCharacteristic->setCallbacks(new BLECharCallbacks());
 
+  //pCharCommandOut = pService->createCharacteristic(
+  //CHAR_CMD_OUT_UUID,
+  //BLECharacteristic::PROPERTY_READ);
+  //pCharacteristic->setValue("");
+  //pCharacteristic->setCallbacks(new BLECharCallbacks());
+
   battChar = pService->createCharacteristic(
-  CHARACTERISTIC_BATT_UUID,
+  CHAR_BATT_UUID,
   BLECharacteristic::PROPERTY_READ );
   pCharacteristic->setValue(batteryPercent); 
   pCharacteristic->setCallbacks(new BLECharCallbacks());
@@ -320,11 +350,11 @@ void getDevicesData()
     randCounter = 1000;
   }
 
-  if (charWriteCounter >= 1000 || charWriteCounterPrev >= 1000)
+  if (charWriteCounter >= 99999 || charWriteCounterPrev >= 99999)
   {
     charWriteCounter = 0;
     charWriteCounterPrev = 0;
-  } 
+  }
   --getBatCounter;
   if (getBatCounter <= 0)
   {
@@ -396,22 +426,36 @@ void getDevicesData()
     lastClickTime.second = curTime.second;
     lastClickTime.day = curTime.day;
     lastClickTime.month = curTime.month;
-
+    idleMilis = IDLE_MILIS;
     if (alarmExecute)
     {
       alarmExecute = false;
       alarmKilled = true;
     }
   }
+  if (charWriteCounter != charWriteCounterPrev)
+  {
+    modeIndex = MODE_TEXT;
+    lastClickTime.hour = curTime.hour;
+    lastClickTime.minute = curTime.minute;
+    lastClickTime.second = curTime.second;
+    lastClickTime.day = curTime.day;
+    lastClickTime.month = curTime.month;
+    redraw = true;
+    setMode();
+    charWriteCounterPrev = charWriteCounter;
+    idleMilis = BT_TEXT_IDLE_MILIS;
+  }
+
   if (brightness > IDLE_BRIGHTNESS)
   {
     int btnDiffMilis = GetSecsDiff(curTime, lastClickTime) * 1000;
-    if (btnDiffMilis > IDLE_MILIS && mode != MODE_FLASHLIGHT)
+    if (btnDiffMilis > idleMilis && mode != MODE_FLASHLIGHT)
     {
       idle = true;
       if (GO_TO_FIRST_MODE_ON_IDLE)
       {
-        if (modeIndex != 0)
+        if (modeIndex != 0 && mode != MODE_STOPWATCH)// && mode != MODE_TIMER)
         {
           resetMode();
         }
@@ -427,6 +471,15 @@ void getDevicesData()
     holdSwitchTime.second = curTime.second;
     holdSwitchTime.day = curTime.day;
     holdSwitchTime.month = curTime.month;
+
+    if (modeIndex == MODE_TEXT)
+    {
+      beepOnNotification = !beepOnNotification;
+      if (beepOnNotification)
+      {
+        StickCP2.Speaker.tone(4000, 20);
+      }
+    }
   }
 
   if (btnStatus[BTNA] == BTN_STATUS_HOLD || (mode != MODE_ROLL && btnStatus[BTNA] == BTN_STATUS_PRESSED)) 
@@ -496,17 +549,78 @@ void getDevicesData()
   {
     brightness = 255;
   }
+  else if (modeIndex == MODE_CLOCK)
+  {
+    if (btnStatus[BTNB] == BTN_STATUS_RELEASED)
+    {
+      sendToggleMedia();
+    }
+  }
+  else if (mode == MODE_STOPWATCH)
+  {
+    if (btnStatus[BTNB] == BTN_STATUS_PRESSED)
+    {
+      if (stopwatchRunning)
+      {
+        stopwatchRunning = false;
+        redraw = true;
+      }
+      else
+      {
+        stopwatchRunning = true;
+        redraw = true;
+        stopwatchStart.hour = curTime.hour;
+        stopwatchStart.minute = curTime.minute;
+        stopwatchStart.second = curTime.second;
+        stopwatchStart.day = curTime.day;
+        stopwatchStart.month = curTime.month;
+      }
+    }
+    if (stopwatchRunning)
+    {
+      int prevElapsed = stopwatchElapsedSecs;
+      stopwatchElapsedSecs = GetSecsDiff(curTime, stopwatchStart);
+
+      if (stopwatchElapsedSecs != prevElapsed)
+      {
+        redraw = true;
+      }
+
+      stopwatchHours = stopwatchElapsedSecs / 3600;
+      int remainingSeconds = stopwatchElapsedSecs % 3600;
+      stopwatchMinutes = remainingSeconds / 60;
+
+      stopwatchSeconds = remainingSeconds % 60;
+    }
+  }
+  else if (mode == MODE_TEXT)
+  {
+    
+  }
+  else if (mode == 99)//MODE_TIMER)
+  {
+    if (btnStatus[BTNB] == BTN_STATUS_PRESSED)
+    {
+      if (timerRunning)
+      {
+        timerRunning = false;
+      }
+      else
+      {
+        timerRunning = true;
+        
+        timerStartedAt.hour = curTime.hour;
+        timerStartedAt.minute = curTime.minute;
+        timerStartedAt.second = curTime.second;
+        timerStartedAt.day = curTime.day;
+        timerStartedAt.month = curTime.month;
+      }
+    }
+  }
   if (prevDeviceConnected != deviceConnected)
   {
     redraw = true;
     prevDeviceConnected = deviceConnected;
-  }
-  if (charWriteCounter != charWriteCounterPrev)
-  {
-    modeIndex = MODE_TEXT;
-    redraw = true;
-    setMode();
-    charWriteCounterPrev = charWriteCounter;
   }
 }
 
@@ -520,6 +634,7 @@ void resetMode()
 {
   modeIndex = 0;
   setMode();
+  idleMilis = IDLE_MILIS;
 }
 
 void beepAlarm()
@@ -549,6 +664,16 @@ void beepAlarm()
   }
 }
 
+void sendToggleMedia()
+{
+  if (deviceConnected)
+  {
+    int cmd = 0;
+    cmd = CMD_MEDIA_TOGGLE;
+    pCharacteristic->setValue(cmd);
+  }
+}
+
 void setMode()
 {
   if (modeIndex >= modeCount)
@@ -557,9 +682,9 @@ void setMode()
   }
   if (mode != modes[modeIndex])
   {
+    brightness = DEFAULT_BRIGHTNESS;
     switch (modes[modeIndex])
     {
-      brightness = DEFAULT_BRIGHTNESS;
       case MODE_CLOCK:
         drawDelay = MODE_CLOCK_DRAW_DELAY;
         clockColor = colors[getRandom(0, 8)];
@@ -578,6 +703,23 @@ void setMode()
         diceCount = 2;
         diceType = 6;
         roll();
+        break;
+      case MODE_TEXT:
+        drawDelay = MODE_CLOCK_DRAW_DELAY;
+        if (beepOnNotification)
+        {
+          StickCP2.Speaker.tone(8000, 10);
+        }
+        break;
+      case MODE_STOPWATCH:
+        if (stopwatchRunning)
+        {
+          drawDelay = MODE_STOPWATCH_RUNNING_DELAY;
+        }
+        else
+        {
+          drawDelay = MODE_CLOCK_DRAW_DELAY;
+        }
         break;
       default:
         drawDelay = DEFAULT_DRAW_DELAY;
@@ -651,6 +793,12 @@ void displayMode()
     case MODE_TEXT:
       displayText();
       break;
+    case MODE_STOPWATCH:
+      displayStopwatch();
+      break;
+    //case MODE_TIMER:
+    //  displayTimer();
+    //  break;
     default:
       resetMode();
       displayClockView(clockColor);
@@ -658,12 +806,40 @@ void displayMode()
   }
 }
 
+void displayTimer()
+{
+  if (timerRunning)
+  {
+    timerSecs = GetSecsDiff(curTime, timerStartedAt);
+    
+    //stopwatchHours = totalSeconds / 3600;
+    //int remainingSeconds = totalSeconds % 3600;
+    //stopwatchMinutes = remainingSeconds / 60;
+    //stopwatchSeconds = remainingSeconds % 60;
+
+  }
+  if (timerRunning && timerSecs <= 0)
+  {
+    timerSecs = 0;
+    timerRunning = false;
+  }
+  StickCP2.Display.clear();
+  StickCP2.Display.setTextSize(1);
+  StickCP2.Display.setColor(clockColor);
+
+  StickCP2.Display.setCursor(20, 20);
+  StickCP2.Display.printf("TIMER");
+
+  StickCP2.Display.setCursor(120, 47);
+  StickCP2.Display.printf("%02d", timerSecs);
+}
+
 void displayText()
 {
     StickCP2.Display.clear();
     StickCP2.Display.setTextColor(WHITE);
-    StickCP2.Display.setTextSize(1);
-    StickCP2.Display.setCursor(20, 20);
+    StickCP2.Display.setTextSize(0.8);
+    StickCP2.Display.setCursor(10, 10);
     StickCP2.Display.printf(toDisplay.c_str());
 }
 
@@ -835,6 +1011,46 @@ void displayAnalogClock()
     StickCP2.Display.drawLine(tempX0, tempY0, tempX1, tempY1);
   }
 
+  int h = curTime.hour % 12;
+  int m = curTime.minute % 60;
+
+  int digitalClockX = 120;
+  int digitalClockY = 47; // (135/2) - 20
+
+  int offsetX = 0;
+  int offsetY = 0;
+
+  if ((h <= 3 || h >= 9) && (m <= 15 || m >= 45))
+  {
+    // bottom
+    offsetY = 20;
+  }
+  else if ((h >= 3 && h <= 9) && (m >= 15 || m <= 45))
+  {
+    // top
+    offsetY = -20;
+  }
+  else if ((h >= 6) && (m >= 30))
+  {
+    // right
+    offsetX = 20;
+  }
+  else if ((h <= 6) && (m <= 30))
+  {
+    offsetX = -20;
+  }
+  else
+  {
+
+  }
+  //offsetX = 0;
+  //offsetY = 0;
+
+  StickCP2.Display.setTextSize(0.7f);
+  StickCP2.Display.setCursor(digitalClockX+offsetX, digitalClockY+offsetY);
+  
+  StickCP2.Display.printf("%02d:%02d", curTime.hour, curTime.minute);
+
   // draw hours arm
   StickCP2.Display.setColor(RED);
   StickCP2.Display.drawLine(centerX, centerY, hourX, hourY);
@@ -843,7 +1059,6 @@ void displayAnalogClock()
   StickCP2.Display.setColor(BLUE);
   StickCP2.Display.drawLine(minX, minY, centerX, centerY);
 
-  
   StickCP2.Display.setTextSize(1);
   StickCP2.Display.setCursor(20, 20);
   StickCP2.Display.printf("%d %%", batteryPercent);
@@ -857,6 +1072,32 @@ float getPointXonCircle(int r, float degrees)
 float getPointYonCircle(int r, float degrees)
 {
   return r * sin((degrees + (DEGREES_OFFSET)) * PI / 180.0);
+}
+
+void displayStopwatch()
+{
+  if (stopwatchRunning)
+  {
+    if (stopwatchHours >= 23 && 
+        stopwatchMinutes >= 59 && 
+        stopwatchSeconds >= 59)
+    {
+      stopwatchHours = 23;
+      stopwatchMinutes = 59;
+      stopwatchSeconds = 59;
+      stopwatchRunning = false;
+    }
+  }
+  StickCP2.Display.clear();
+  StickCP2.Display.setTextSize(1);
+  StickCP2.Display.setColor(clockColor);
+
+  StickCP2.Display.setCursor(20, 20);
+  StickCP2.Display.printf("STOPWATCH");
+
+  StickCP2.Display.setTextSize(1.6f);
+  StickCP2.Display.setCursor(20, 70);
+  StickCP2.Display.printf("%02d:%02d:%02d", stopwatchHours, stopwatchMinutes, stopwatchSeconds);
 }
 
 void setAlarm(int hour, int minute)
