@@ -1,80 +1,11 @@
-/**
- * @file battery.ino
- * @author SeanKwok (shaoxiang@m5stack.com)
- * @brief M5StickCPlus2 get battery voltage
- * @version 0.1
- * @date 2023-12-12
- *
- *
- * @Hardwares: M5StickCPlus2
- * @Platform Version: Arduino M5Stack Board Manager v2.0.9
- * @Dependent Library:
- * M5GFX: https://github.com/m5stack/M5GFX
- * M5Unified: https://github.com/m5stack/M5Unified
- * M5StickCPlus2: https://github.com/m5stack/M5StickCPlus2
- */
-
 #include "M5StickCPlus2.h"
+#include "watch_config.h"
 
-// BLE
 #include <BLEDevice.h>
 #include <BLEUtils.h>
 #include <BLEServer.h>
 #include <Preferences.h>
 
-#define MAX_VOLTAGE 4350
-#define MIN_VOLTAGE 3000
-#define TIMEZONE 2
-
-#define TOO_MANY_SECONDS 86400 //24h
-
-#define DEFAULT_DELAY 150
-#define DEFAULT_DRAW_DELAY 2000
-#define ALARM_BUZZ_INTERVAL 1000;
-#define BTNB_HOLD_SWITCH_DELAY 1001;
-
-#define MODE_CLOCK 0
-#define MODE_FLASHLIGHT 1
-#define MODE_ALARM 2
-#define MODE_ROLL 3
-#define MODE_TEXT 4
-#define MODE_STOPWATCH 5
-#define MODE_TIMER2 6
-
-#define MODE_CLOCK_DRAW_DELAY 3000
-#define MODE_FLASHLIGHT_DRAW_DELAY 10000
-#define MODE_ALARM_DRAW_DELAY 1000
-#define MODE_STOPWATCH_RUNNING_DELAY 500
-#define DEFAULT_BRIGHTNESS 10
-#define IDLE_BRIGHTNESS 1
-#define IDLE_MILIS 30000
-#define BT_TEXT_IDLE_MILIS 10000
-#define CLOCK_FREQUENCY 80
-#define GET_BAT_ITERATIONS 5
-#define RTC_SEC_OFFSET 5
-
-#define SERVICE_UUID "4fafc201-1fb5-459e-8fcc-c5c9c331914b" // random uuid
-
-#define CHAR_TEXT_UUID "beb5483e-36e1-4688-b7f5-ea07361b2137" //random uuid
-#define CHAR_BATT_UUID "dead483e-36e1-4688-b7f5-ea07361b2137"
-#define CHAR_CMD_OUT_UUID "d00baaaa-36e1-4688-b7f5-ea07361b2138"
-#define DICE_TYPES_COUNT 9
-#define DICE_COUNT_MAX 6
-
-#define BTN_STATUS_NONE 0
-#define BTN_STATUS_HOLD 1
-#define BTN_STATUS_CLICKED 2
-#define BTN_STATUS_PRESSED 3
-#define BTN_STATUS_RELEASED 4
-
-#define CMD_MEDIA_TOGGLE 1
-
-#define BTNA 0
-#define BTNB 1
-#define BTNPWR 2
-#define PI 3.1415
-#define DEGREES_OFFSET -90
-#define GO_TO_FIRST_MODE_ON_IDLE true
 unsigned int diceType;
 unsigned int diceCount;
 int * diceResult;
@@ -94,7 +25,8 @@ int modes[] =
   MODE_ALARM,
   MODE_ROLL,
   MODE_TEXT,
-  MODE_STOPWATCH
+  MODE_STOPWATCH,
+  MODE_IMU
 //,
 //  MODE_TIMER
 };
@@ -185,6 +117,9 @@ bool stopwatchRunning = false;
 bool timerRunning = false;
 int stopwatchElapsedSecs = 0;
 int idleMilis = 0;
+bool imuEnable = false;
+m5::imu_data_t imuDataPrev;
+m5::imu_data_t imuData;
 
 //Setup callbacks onConnect and onDisconnect
 class BLECallbacks: public BLEServerCallbacks {
@@ -302,9 +237,11 @@ int getRandom(int from, int to)
 
 BLEServer *pServer;
 BLEService *pService;
+BLEService *timeService;
 BLECharacteristic *pCharacteristic;
 BLECharacteristic *pCharCommandOut;
 BLECharacteristic *battChar;
+BLECharacteristic *startTimeChar;
 
 void initBT()
 {
@@ -312,6 +249,7 @@ void initBT()
   pServer = BLEDevice::createServer();
   pServer->setCallbacks(new BLECallbacks());
   pService = pServer->createService(SERVICE_UUID);
+  timeService = pServer->createService(TIME_SERVICE_UUID);
   pCharacteristic = pService->createCharacteristic(
   CHAR_TEXT_UUID,
   BLECharacteristic::PROPERTY_READ |
@@ -327,14 +265,22 @@ void initBT()
 
   battChar = pService->createCharacteristic(
   CHAR_BATT_UUID,
+  BLECharacteristic::PROPERTY_READ);
+  battChar->setValue(batteryPercent);
+  battChar->setCallbacks(new BLECharCallbacks());
+
+  startTimeChar = timeService->createCharacteristic(
+  CHAR_START_UUID,
   BLECharacteristic::PROPERTY_READ );
-  pCharacteristic->setValue(batteryPercent); 
-  pCharacteristic->setCallbacks(new BLECharCallbacks());
+  startTimeChar->setValue(("" + String(startTime.day) + "." + String(startTime.month) + " " + String(startTime.hour) + ":" + String(startTime.minute)).c_str()); 
+  startTimeChar->setCallbacks(new BLECharCallbacks());
 
   pService->start();
+  timeService->start();
   // BLEAdvertising *pAdvertising = pServer->getAdvertising(); // this still is working for backward compatibility
   BLEAdvertising *pAdvertising = BLEDevice::getAdvertising();
   pAdvertising->addServiceUUID(SERVICE_UUID);
+  pAdvertising->addServiceUUID(TIME_SERVICE_UUID);
   pAdvertising->setScanResponse(true);
   pAdvertising->setMinPreferred(0x06); // functions that help with iPhone connections issue
   pAdvertising->setMinPreferred(0x12);
@@ -413,7 +359,7 @@ void getDevicesData()
                   : M5.BtnPWR.wasPressed() ? BTN_STATUS_PRESSED
                   : M5.BtnPWR.wasReleased() ? BTN_STATUS_RELEASED
                   : BTN_STATUS_NONE;
-
+  
   if (btnStatus[BTNA] != BTN_STATUS_NONE ||
       btnStatus[BTNB] != BTN_STATUS_NONE ||
       btnStatus[BTNPWR] != BTN_STATUS_NONE)
@@ -477,7 +423,7 @@ void getDevicesData()
       beepOnNotification = !beepOnNotification;
       if (beepOnNotification)
       {
-        StickCP2.Speaker.tone(4000, 20);
+        StickCP2.Speaker.tone(3000, 50);
       }
     }
   }
@@ -527,19 +473,19 @@ void getDevicesData()
       }
       roll();
     }
-    else if (btnStatus[BTNB] == BTN_STATUS_HOLD)
-    {
-      rollMode++;
-      if (rollMode > 1)
-      {
-        rollMode = 0;
-      }
-      roll();
-    }
-    else if(btnStatus[BTNA] == BTN_STATUS_PRESSED)
-    {
-      roll();
-    }
+    //else if (btnStatus[BTNB] == BTN_STATUS_HOLD)
+    //{
+    // rollMode++;
+    //if (rollMode > 1)
+    //  {
+    //    rollMode = 0;
+    //  }
+    //  roll();
+    //}
+    //else if(btnStatus[BTNA] == BTN_STATUS_PRESSED)
+    //{
+    //  roll();
+    //}
     else if(btnStatus[BTNPWR] == BTN_STATUS_PRESSED)
     {
       roll();
@@ -622,6 +568,19 @@ void getDevicesData()
     redraw = true;
     prevDeviceConnected = deviceConnected;
   }
+  if (imuEnable)
+  {
+    auto imu_update = M5.Imu.update();
+    if (imu_update)
+    {
+      nextFrameDelayMilis = FAST_DELAY;
+      imuDataPrev = imuData;
+      // Obtain data on the current value of the IMU.
+      auto data = M5.Imu.getImuData();
+      imuData = data;
+      redraw = true;
+    }
+  }
 }
 
 void setModeToNext()
@@ -683,6 +642,15 @@ void setMode()
   if (mode != modes[modeIndex])
   {
     brightness = DEFAULT_BRIGHTNESS;
+
+    switch (mode)
+    {
+      case MODE_IMU:
+        nextFrameDelayMilis = DEFAULT_DELAY;
+        imuEnable = false;
+        break;
+    }
+
     switch (modes[modeIndex])
     {
       case MODE_CLOCK:
@@ -721,6 +689,11 @@ void setMode()
           drawDelay = MODE_CLOCK_DRAW_DELAY;
         }
         break;
+      case MODE_IMU:
+        imuEnable = true;
+        nextFrameDelayMilis = FAST_DELAY;
+        break;
+      
       default:
         drawDelay = DEFAULT_DRAW_DELAY;
         break;
@@ -795,6 +768,9 @@ void displayMode()
       break;
     case MODE_STOPWATCH:
       displayStopwatch();
+      break;
+    case MODE_IMU:
+      displayImu();
       break;
     //case MODE_TIMER:
     //  displayTimer();
@@ -1064,6 +1040,54 @@ void displayAnalogClock()
   StickCP2.Display.printf("%d %%", batteryPercent);
 }
 
+void displayImu()
+{
+  
+  StickCP2.Display.clear();
+  StickCP2.Display.setTextSize(0.6);
+
+  int x = 45;
+  int xOffset = 40;
+
+  int y = 20;
+  int yOffset = 30;
+
+  StickCP2.Display.setCursor(x, y);
+  StickCP2.Display.printf("X");
+
+      StickCP2.Display.setCursor(x + (xOffset), y);
+  StickCP2.Display.printf("Y");
+
+      StickCP2.Display.setCursor(x + (2*xOffset), y);
+  StickCP2.Display.printf("Z");
+
+  StickCP2.Display.setCursor(10, 50);
+  StickCP2.Display.printf("A");
+
+  StickCP2.Display.setCursor(10, 80);
+  StickCP2.Display.printf("G");
+  y = y + yOffset;
+  for(int i=0; i<2; i++)
+  {
+    int _y = y + (i*yOffset);
+    for (int j=0; j<4; j++)
+    {
+      int _x = x + (j*xOffset);
+      StickCP2.Display.setCursor(_x, _y);
+
+      if (j < 3)
+      {
+        int index = (i * 3) + j;
+        StickCP2.Display.printf("%02.1f", imuData.value[index]);    
+      }
+      else if (j == 3)
+      {
+        StickCP2.Display.printf("%02.1f",getImuMagnitude(i*3));
+      }
+    }
+  }
+}
+
 float getPointXonCircle(int r, float degrees)
 {
   return r * cos((degrees + (DEGREES_OFFSET)) * PI / 180.0);
@@ -1207,3 +1231,22 @@ void clearDiceResults()
   }
 }
 
+
+//// all sensor 9values array [0~2]=accel / [3~5]=gyro / [6~8]=mag
+float getImuMagnitude(int startIndex)
+{
+  float sum = 0;
+  if (!imuEnable)
+    return sum;
+  int endIndex = startIndex + 2;
+  for (int i=startIndex; i<=endIndex; i++)
+  {
+    float val = imuData.value[i] * imuData.value[i];
+    sum += val;
+  }
+  float len = sqrt(sum);
+  return len;
+}
+
+float getAccMagnitude() { return getImuMagnitude(IMU_DATA_ACC_START_INDEX); }
+float getGyroMagnitude() { return getImuMagnitude(IMU_DATA_GYRO_START_INDEX); }
