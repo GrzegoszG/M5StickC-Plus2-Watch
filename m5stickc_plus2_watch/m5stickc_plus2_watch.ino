@@ -304,6 +304,7 @@ void getDevicesData()
   --getBatCounter;
   if (getBatCounter <= 0)
   {
+    
     getBatCounter = GET_BAT_ITERATIONS;
     batteryVoltage = StickCP2.Power.getBatteryVoltage();
     int normalized_vol = batteryVoltage - MIN_VOLTAGE;
@@ -434,13 +435,18 @@ void getDevicesData()
   }
   if (mode == MODE_ALARM)
   {
+    if (btnStatus[BTNPWR] == BTN_STATUS_PRESSED)
+    {
+      setDateTime((24+(alarmTime.hour - TIMEZONE))%24, alarmTime.minute, 0);
+      StickCP2.Speaker.tone(3000, 50);
+    }
     if (btnStatus[BTNB] == BTN_STATUS_HOLD)
     {
-        alarmSetType = (alarmSetType + 1) % 3;
-        if (alarmSetType == 2)
-        {
-          alarmEnable = !alarmEnable;
-        }
+      alarmSetType = (alarmSetType + 1) % 3;
+      if (alarmSetType == 2)
+      {
+        alarmEnable = !alarmEnable;
+      }
     }
     else if (btnStatus[BTNB] == BTN_STATUS_RELEASED)
     {
@@ -581,6 +587,15 @@ void getDevicesData()
       redraw = true;
     }
   }
+}
+
+void setDateTime(int hour, int minute, int second)
+{
+  auto t = M5.Rtc.getTime();
+  t.hours = hour;
+  t.minutes = minute;
+  t.seconds = 0;
+  M5.Rtc.setTime(&t);
 }
 
 void setModeToNext()
@@ -901,8 +916,8 @@ void displayClockViewDebug(int color)
 
 void displayClockView(int color)
 {
-  displayAnalogClock();
-  return;
+  //displayAnalogClock();
+  //return;
   if (color != clockColor)
   {
     StickCP2.Display.setTextColor(color);
@@ -1230,7 +1245,6 @@ void clearDiceResults()
     diceResult[i] = 0;
   }
 }
-
 
 //// all sensor 9values array [0~2]=accel / [3~5]=gyro / [6~8]=mag
 float getImuMagnitude(int startIndex)
