@@ -6,6 +6,9 @@
 #include <BLEServer.h>
 #include <Preferences.h>
 
+#define BEEPF 3000
+#define BEEPL 200
+
 unsigned int diceType;
 unsigned int diceCount;
 int * diceResult;
@@ -184,6 +187,7 @@ void setup()
     toDisplay = "";
     charWriteCounter = 0;
     charWriteCounterPrev = 0;
+    beepOnNotification = true;
     auto cfg = M5.config();
     StickCP2.begin(cfg);
     preferences.begin("app", false);
@@ -424,7 +428,7 @@ void getDevicesData()
       beepOnNotification = !beepOnNotification;
       if (beepOnNotification)
       {
-        StickCP2.Speaker.tone(3000, 50);
+        beep();
       }
     }
   }
@@ -438,7 +442,7 @@ void getDevicesData()
     if (btnStatus[BTNPWR] == BTN_STATUS_PRESSED)
     {
       setDateTime((24+(alarmTime.hour - TIMEZONE))%24, alarmTime.minute, 0);
-      StickCP2.Speaker.tone(3000, 50);
+      beep();
     }
     if (btnStatus[BTNB] == BTN_STATUS_HOLD)
     {
@@ -589,6 +593,11 @@ void getDevicesData()
   }
 }
 
+void beep()
+{
+  StickCP2.Speaker.tone(BEEPF, BEEPL);
+}
+
 void setDateTime(int hour, int minute, int second)
 {
   auto t = M5.Rtc.getTime();
@@ -629,7 +638,7 @@ void beepAlarm()
     if (curTime.second % 2 == 0 && alarmLastBeepSecond < curTime.second)
     {
       alarmLastBeepSecond = curTime.second;
-      StickCP2.Speaker.tone(8000, 40);
+      beep();
     }
     if (alarmTime.hour != curTime.hour || alarmTime.minute != curTime.minute)
     {
@@ -691,7 +700,7 @@ void setMode()
         drawDelay = MODE_CLOCK_DRAW_DELAY;
         if (beepOnNotification)
         {
-          StickCP2.Speaker.tone(8000, 10);
+          beep();
         }
         break;
       case MODE_STOPWATCH:
@@ -1264,3 +1273,9 @@ float getImuMagnitude(int startIndex)
 
 float getAccMagnitude() { return getImuMagnitude(IMU_DATA_ACC_START_INDEX); }
 float getGyroMagnitude() { return getImuMagnitude(IMU_DATA_GYRO_START_INDEX); }
+
+void goToSleep()
+{
+  esp_sleep_enable_ext0_wakeup(GPIO_NUM_35, 0);
+  esp_deep_sleep_start();
+}
